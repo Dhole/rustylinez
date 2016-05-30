@@ -42,6 +42,9 @@ use std::sync::atomic;
 use nix::errno::Errno;
 use nix::sys::signal;
 use nix::sys::termios;
+use std::sync::mpsc::{channel, Sender, Receiver};
+use std::thread;
+use std::io::{Chars, CharsError, StdinLock};
 
 use completion::Completer;
 use consts::{KeyPress, char_to_key_press};
@@ -527,8 +530,8 @@ fn edit_history_next(s: &mut State, history: &History, prev: bool) -> Result<()>
 }
 
 /// Completes the line/word
-fn complete_line<R: io::Read>(chars: &mut io::Chars<R>,
-                              s: &mut State,
+fn complete_line(get_char_or_print: &Fn(&mut State) -> Result<result::Result<char, CharsError>>,
+                              mut s: &mut State,
                               completer: &Completer)
                               -> Result<Option<char>> {
     let (start, candidates) = try!(completer.complete(&s.line, s.line.pos()));
@@ -552,7 +555,7 @@ fn complete_line<R: io::Read>(chars: &mut io::Chars<R>,
                 s.snapshot();
             }
 
-            ch = try!(chars.next().unwrap());
+            ch = try!(try!(get_char_or_print(&mut s)));
             let key = char_to_key_press(ch);
             match key {
                 KeyPress::TAB => {
@@ -580,8 +583,8 @@ fn complete_line<R: io::Read>(chars: &mut io::Chars<R>,
 
 /// Incremental search
 #[cfg_attr(feature="clippy", allow(if_not_else))]
-fn reverse_incremental_search<R: io::Read>(chars: &mut io::Chars<R>,
-                                           s: &mut State,
+fn reverse_incremental_search(get_char_or_print: &Fn(&mut State) -> Result<result::Result<char, CharsError>>,
+                                           mut s: &mut State,
                                            history: &History)
                                            -> Result<Option<KeyPress>> {
     // Save the current edited line (and cursor position) before to overwrite it
@@ -603,13 +606,13 @@ fn reverse_incremental_search<R: io::Read>(chars: &mut io::Chars<R>,
         };
         try!(s.refresh_prompt_and_line(&prompt));
 
-        ch = try!(chars.next().unwrap());
+        ch = try!(try!(get_char_or_print(&mut s)));
         if !ch.is_control() {
             search_buf.push(ch);
         } else {
             key = char_to_key_press(ch);
             if key == KeyPress::ESC {
-                key = try!(escape_sequence(chars));
+                key = try!(escape_sequence(&get_char_or_print, &mut s));
             }
             match key {
                 KeyPress::CTRL_H | KeyPress::BACKSPACE => {
@@ -657,15 +660,15 @@ fn reverse_incremental_search<R: io::Read>(chars: &mut io::Chars<R>,
     Ok(Some(key))
 }
 
-fn escape_sequence<R: io::Read>(chars: &mut io::Chars<R>) -> Result<KeyPress> {
+fn escape_sequence(get_char_or_print: &Fn(&mut State) -> Result<result::Result<char, CharsError>>, mut s: &mut State) -> Result<KeyPress> {
     // Read the next two bytes representing the escape sequence.
-    let seq1 = try!(chars.next().unwrap());
+    let seq1 = try!(try!(get_char_or_print(&mut s)));
     if seq1 == '[' {
         // ESC [ sequences.
-        let seq2 = try!(chars.next().unwrap());
+        let seq2 = try!(try!(get_char_or_print(&mut s)));
         if seq2.is_digit(10) {
             // Extended escape, read additional byte.
-            let seq3 = try!(chars.next().unwrap());
+            let seq3 = try!(try!(get_char_or_print(&mut s)));
             if seq3 == '~' {
                 match seq2 {
                     '3' => Ok(KeyPress::ESC_SEQ_DELETE),
@@ -689,7 +692,7 @@ fn escape_sequence<R: io::Read>(chars: &mut io::Chars<R>) -> Result<KeyPress> {
         }
     } else if seq1 == 'O' {
         // ESC O sequences.
-        let seq2 = try!(chars.next().unwrap());
+        let seq2 = try!(try!(get_char_or_print(&mut s)));
         match seq2 {
             'F' => Ok(KeyPress::CTRL_E),
             'H' => Ok(KeyPress::CTRL_A),
@@ -727,17 +730,45 @@ fn readline_edit(prompt: &str,
                  history: &mut History,
                  completer: Option<&Completer>,
                  kill_ring: &mut KillRing,
-                 original_termios: termios::Termios)
+                 original_termios: termios::Termios,
+                 tx: &mut Sender<Input>,
+                 rx: &Receiver<Input>)
                  -> Result<String> {
     let mut stdout = io::stdout();
     try!(write_and_flush(&mut stdout, prompt.as_bytes()));
 
     kill_ring.reset();
     let mut s = State::new(&mut stdout, prompt, MAX_LINE, get_columns(), history.len());
-    let stdin = io::stdin();
-    let mut chars = stdin.lock().chars();
+    let (continue_tx, continue_rx) = channel();
+    let tx = tx.clone();
+    thread::spawn(move || {
+        let stdin = io::stdin();
+        let mut chars = stdin.lock().chars();
+        loop {
+            let c = chars.next().unwrap();
+            tx.send(Input::Stdin(c)).unwrap();
+            if !continue_rx.recv().unwrap_or(false) {
+                break;
+            }
+        }
+    });
+    let get_char_or_print = move |s: &mut State| {
+        loop {
+            match rx.recv().unwrap() {
+                Input::Stdout(line) => {
+                    print!("\r\x1b[J{}", line);
+                    try!(s.refresh_line());
+                    continue;
+                },
+                Input::Stdin(c) => {
+                    continue_tx.send(true).unwrap();
+                    return Ok(c);
+                },
+            }
+        }
+    };
     loop {
-        let c = chars.next().unwrap();
+        let c = try!(get_char_or_print(&mut s));
         if c.is_err() && SIGWINCH.compare_and_swap(true, false, atomic::Ordering::SeqCst) {
             s.cols = get_columns();
             try!(s.refresh_line());
@@ -753,7 +784,7 @@ fn readline_edit(prompt: &str,
         let mut key = char_to_key_press(ch);
         // autocomplete
         if key == KeyPress::TAB && completer.is_some() {
-            let next = try!(complete_line(&mut chars, &mut s, completer.unwrap()));
+            let next = try!(complete_line(&get_char_or_print, &mut s, completer.unwrap()));
             if next.is_some() {
                 kill_ring.reset();
                 ch = next.unwrap();
@@ -767,7 +798,7 @@ fn readline_edit(prompt: &str,
             }
         } else if key == KeyPress::CTRL_R {
             // Search history backward
-            let next = try!(reverse_incremental_search(&mut chars, &mut s, history));
+            let next = try!(reverse_incremental_search(&get_char_or_print, &mut s, history));
             if next.is_some() {
                 key = next.unwrap();
             } else {
@@ -775,7 +806,7 @@ fn readline_edit(prompt: &str,
             }
         } else if key == KeyPress::ESC {
             // escape sequence
-            key = try!(escape_sequence(&mut chars));
+            key = try!(escape_sequence(&get_char_or_print, &mut s));
             if key == KeyPress::UNKNOWN_ESC_SEQ {
                 continue;
             }
@@ -855,7 +886,7 @@ fn readline_edit(prompt: &str,
             KeyPress::CTRL_V => {
                 // Quoted insert
                 kill_ring.reset();
-                let c = chars.next().unwrap();
+                let c = try!(get_char_or_print(&mut s));
                 let ch = try!(c);
                 try!(edit_insert(&mut s, ch))
             }
@@ -963,11 +994,13 @@ impl Drop for Guard {
 fn readline_raw(prompt: &str,
                 history: &mut History,
                 completer: Option<&Completer>,
-                kill_ring: &mut KillRing)
+                kill_ring: &mut KillRing,
+                tx: &mut Sender<Input>,
+                rx: &Receiver<Input>)
                 -> Result<String> {
     let original_termios = try!(enable_raw_mode());
     let guard = Guard(original_termios);
-    let user_input = readline_edit(prompt, history, completer, kill_ring, original_termios);
+    let user_input = readline_edit(prompt, history, completer, kill_ring, original_termios, tx, rx);
     drop(guard); // try!(disable_raw_mode(original_termios));
     println!("");
     user_input
@@ -991,12 +1024,20 @@ pub struct Editor<'completer> {
     history: History,
     completer: Option<&'completer Completer>,
     kill_ring: KillRing,
+    tx: Sender<Input>,
+    rx: Receiver<Input>,
+}
+
+pub enum Input {
+    Stdin(result::Result<char, CharsError>),
+    Stdout(String),
 }
 
 impl<'completer> Editor<'completer> {
     pub fn new() -> Editor<'completer> {
         // TODO check what is done in rl_initialize()
         // if the number of columns is stored here, we need a SIGWINCH handler...
+        let (tx, rx) = channel();
         let editor = Editor {
             unsupported_term: is_unsupported_term(),
             stdin_isatty: is_a_tty(libc::STDIN_FILENO),
@@ -1004,6 +1045,8 @@ impl<'completer> Editor<'completer> {
             history: History::new(),
             completer: None,
             kill_ring: KillRing::new(60),
+            tx: tx,
+            rx: rx,
         };
         if !editor.unsupported_term && editor.stdin_isatty && editor.stdout_isatty {
             install_sigwinch_handler();
@@ -1027,7 +1070,9 @@ impl<'completer> Editor<'completer> {
             readline_raw(prompt,
                          &mut self.history,
                          self.completer,
-                         &mut self.kill_ring)
+                         &mut self.kill_ring,
+                         &mut self.tx,
+                         &self.rx)
         }
     }
 
@@ -1059,6 +1104,16 @@ impl<'completer> Editor<'completer> {
     /// Register a callback function to be called for tab-completion.
     pub fn set_completer(&mut self, completer: Option<&'completer Completer>) {
         self.completer = completer;
+    }
+
+    /// Return a clone to the stdout Sender
+    pub fn clone_stdout_tx(&self) -> Sender<Input> {
+        self.tx.clone()
+    }
+
+    pub fn get_println(&self) -> Box<Fn(String): Send> {
+        let tx = self.tx.clone();
+        Box::new(move |s| tx.send(Input::Stdout(s)).unwrap())
     }
 }
 
