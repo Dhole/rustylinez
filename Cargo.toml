@@ -1,10 +1,9 @@
 [package]
-name = "rustyline2"
-version = "0.2.3"
+name = "rustylinez"
+version = "0.2.2"
 authors = ["Katsu Kawakami <kkawa1570@gmail.com>, Dhole <dhole@openmailbox>"]
 description = "Rustyline, a readline implementation based on Antirez's Linenoise"
-documentation = "http://kkawakam.github.io/rustyline/rustyline"
-repository = "https://github.com/kkawakam/rustyline"
+repository = "https://github.com/Dhole/rustylinez"
 readme = "README.md"
 keywords = ["readline"]
 license = "MIT"

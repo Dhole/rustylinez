@@ -42,9 +42,10 @@ use std::sync::atomic;
 use nix::errno::Errno;
 use nix::sys::signal;
 use nix::sys::termios;
-use std::sync::mpsc::{channel, Sender, Receiver};
+use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{Receiver, SendError, Sender, channel};
 use std::thread;
-use std::io::{Chars, CharsError, StdinLock};
+use std::io::CharsError;
 
 use completion::Completer;
 use consts::{KeyPress, char_to_key_press};
@@ -531,9 +532,9 @@ fn edit_history_next(s: &mut State, history: &History, prev: bool) -> Result<()>
 
 /// Completes the line/word
 fn complete_line(get_char_or_print: &Fn(&mut State) -> Result<result::Result<char, CharsError>>,
-                              mut s: &mut State,
-                              completer: &Completer)
-                              -> Result<Option<char>> {
+                 mut s: &mut State,
+                 completer: &Completer)
+                 -> Result<Option<char>> {
     let (start, candidates) = try!(completer.complete(&s.line, s.line.pos()));
     if candidates.is_empty() {
         try!(beep());
@@ -583,10 +584,11 @@ fn complete_line(get_char_or_print: &Fn(&mut State) -> Result<result::Result<cha
 
 /// Incremental search
 #[cfg_attr(feature="clippy", allow(if_not_else))]
-fn reverse_incremental_search(get_char_or_print: &Fn(&mut State) -> Result<result::Result<char, CharsError>>,
-                                           mut s: &mut State,
-                                           history: &History)
-                                           -> Result<Option<KeyPress>> {
+fn reverse_incremental_search(get_char_or_print: &Fn(&mut State)
+                                                     -> Result<result::Result<char, CharsError>>,
+                              mut s: &mut State,
+                              history: &History)
+                              -> Result<Option<KeyPress>> {
     // Save the current edited line (and cursor position) before to overwrite it
     s.snapshot();
 
@@ -660,7 +662,9 @@ fn reverse_incremental_search(get_char_or_print: &Fn(&mut State) -> Result<resul
     Ok(Some(key))
 }
 
-fn escape_sequence(get_char_or_print: &Fn(&mut State) -> Result<result::Result<char, CharsError>>, mut s: &mut State) -> Result<KeyPress> {
+fn escape_sequence(get_char_or_print: &Fn(&mut State) -> Result<result::Result<char, CharsError>>,
+                   mut s: &mut State)
+                   -> Result<KeyPress> {
     // Read the next two bytes representing the escape sequence.
     let seq1 = try!(try!(get_char_or_print(&mut s)));
     if seq1 == '[' {
@@ -756,14 +760,14 @@ fn readline_edit(prompt: &str,
         loop {
             match rx.recv().unwrap() {
                 Input::Stdout(line) => {
-                    print!("\r\x1b[J{}", line);
+                    println!("\r\x1b[J{}", line);
                     try!(s.refresh_line());
                     continue;
-                },
+                }
                 Input::Stdin(c) => {
                     continue_tx.send(true).unwrap();
                     return Ok(c);
-                },
+                }
             }
         }
     };
@@ -1000,7 +1004,13 @@ fn readline_raw(prompt: &str,
                 -> Result<String> {
     let original_termios = try!(enable_raw_mode());
     let guard = Guard(original_termios);
-    let user_input = readline_edit(prompt, history, completer, kill_ring, original_termios, tx, rx);
+    let user_input = readline_edit(prompt,
+                                   history,
+                                   completer,
+                                   kill_ring,
+                                   original_termios,
+                                   tx,
+                                   rx);
     drop(guard); // try!(disable_raw_mode(original_termios));
     println!("");
     user_input
@@ -1024,6 +1034,7 @@ pub struct Editor<'completer> {
     history: History,
     completer: Option<&'completer Completer>,
     kill_ring: KillRing,
+    reading: Arc<Mutex<bool>>,
     tx: Sender<Input>,
     rx: Receiver<Input>,
 }
@@ -1045,6 +1056,7 @@ impl<'completer> Editor<'completer> {
             history: History::new(),
             completer: None,
             kill_ring: KillRing::new(60),
+            reading: Arc::new(Mutex::new(false)),
             tx: tx,
             rx: rx,
         };
@@ -1067,12 +1079,21 @@ impl<'completer> Editor<'completer> {
             // Not a tty: read from file / pipe.
             readline_direct()
         } else {
-            readline_raw(prompt,
-                         &mut self.history,
-                         self.completer,
-                         &mut self.kill_ring,
-                         &mut self.tx,
-                         &self.rx)
+            {
+                let mut reading = self.reading.lock().unwrap();
+                *reading = true;
+            }
+            let res = readline_raw(prompt,
+                                   &mut self.history,
+                                   self.completer,
+                                   &mut self.kill_ring,
+                                   &mut self.tx,
+                                   &self.rx);
+            {
+                let mut reading = self.reading.lock().unwrap();
+                *reading = false;
+            }
+            return res;
         }
     }
 
@@ -1106,14 +1127,25 @@ impl<'completer> Editor<'completer> {
         self.completer = completer;
     }
 
-    /// Return a clone to the stdout Sender
+    /// Return a clone to the stdout Sender.
     pub fn clone_stdout_tx(&self) -> Sender<Input> {
         self.tx.clone()
     }
 
-    pub fn get_println(&self) -> Box<Fn(String): Send> {
+    /// Return a function to print to stdout concurrently while readline is active.
+    pub fn get_println(&self) -> Box<Fn(String) + Send> {
         let tx = self.tx.clone();
-        Box::new(move |s| tx.send(Input::Stdout(s)).unwrap())
+        let reading = self.reading.clone();
+        Box::new(move |s| {
+            let reading = reading.lock().unwrap();
+            if *reading {
+                if let Err(SendError(Input::Stdout(s))) = tx.send(Input::Stdout(s)) {
+                    println!("{}", s);
+                }
+            } else {
+                println!("{}", s);
+            }
+        })
     }
 }
 

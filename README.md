@@ -1,9 +1,9 @@
-# RustyLine
-[![Build Status](https://travis-ci.org/kkawakam/rustyline.svg?branch=master)](https://travis-ci.org/kkawakam/rustyline)
+# RustyLineZ
 
 Readline implementation in Rust that is based on [Antirez' Linenoise](https://github.com/antirez/linenoise)
 
-[Documentation](https://kkawakam.github.io/rustyline)
+This fork adds support to concurrent printing to stdout while a line is being
+edited.
 
 ## Build
 This project uses Cargo and Rust Nightly
@@ -15,6 +15,8 @@ cargo build --release
 ```rust
 extern crate rustyline;
 
+use std::time::Duration;
+use std::thread;
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
 
@@ -23,6 +25,13 @@ fn main() {
     if let Err(_) = rl.load_history("history.txt") {
         println!("No previous history.");
     }
+    let rl_println = rl.get_println();
+    thread::spawn(move || {
+        loop {
+            thread::sleep(Duration::from_secs(3));
+            rl_println(format!("OLA K ASE"));
+        }
+    });
     loop {
         let readline = rl.readline(">> ");
         match readline {
@@ -54,7 +63,7 @@ to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rustyline = "0.2.2"
+rustylinez = { git = "https://github.com/Dhole/rustylinez.git" }
 ```
 
 ## Features
