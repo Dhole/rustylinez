@@ -1012,7 +1012,7 @@ fn readline_raw(prompt: &str,
                                    tx,
                                    rx);
     drop(guard); // try!(disable_raw_mode(original_termios));
-    println!("");
+    print!("\r\x1b[J");
     user_input
 }
 
@@ -1146,6 +1146,47 @@ impl<'completer> Editor<'completer> {
                 println!("{}", s);
             }
         })
+    }
+
+    /// Return a printer object  to print to stdout concurrently while readline is active.
+    pub fn get_printer(&self) -> Printer {
+        let tx = self.tx.clone();
+        let reading = self.reading.clone();
+        Printer {
+            tx: tx,
+            reading: reading,
+        }
+    }
+}
+
+pub struct Printer {
+    tx: Sender<Input>,
+    reading: Arc<Mutex<bool>>,
+}
+
+impl Printer {
+    pub fn println(&mut self, s: String) {
+        let reading = self.reading.lock().unwrap();
+        if *reading {
+            if let Err(SendError(Input::Stdout(s))) = self.tx.send(Input::Stdout(s)) {
+                println!("{}", s);
+            }
+        } else {
+            println!("{}", s);
+        }
+    }
+}
+
+unsafe impl Send for Printer {}
+
+impl Clone for Printer {
+    fn clone(&self) -> Self {
+        let tx = self.tx.clone();
+        let reading = self.reading.clone();
+        Printer {
+            tx: tx,
+            reading: reading,
+        }
     }
 }
 
