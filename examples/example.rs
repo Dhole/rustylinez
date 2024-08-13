@@ -1,18 +1,24 @@
-extern crate rustyline;
+extern crate rustylinez;
 
-use rustyline::completion::FilenameCompleter;
-use rustyline::error::ReadlineError;
-use rustyline::Editor;
+use std::time::Duration;
+use std::thread;
+use rustylinez::error::ReadlineError;
+use rustylinez::Editor;
 
 fn main() {
-    let c = FilenameCompleter::new();
     let mut rl = Editor::new();
-    rl.set_completer(Some(&c));
     if let Err(_) = rl.load_history("history.txt") {
         println!("No previous history.");
     }
+    let rl_println = rl.get_println();
+    thread::spawn(move || {
+        loop {
+            thread::sleep(Duration::from_secs(3));
+            rl_println(format!("OLA K ASE"));
+        }
+    });
     loop {
-        let readline = rl.readline("\x1b[1;32m>>\x1b[0m ");
+        let readline = rl.readline(">> ");
         match readline {
             Ok(line) => {
                 rl.add_history_entry(&line);

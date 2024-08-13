@@ -252,14 +252,14 @@ impl LineBuffer {
         if pos == 0 {
             return None;
         }
-        let mut pos = pos;
+        let mut pos: usize = pos;
         // eat any spaces on the left
         pos -= self.buf[..pos]
             .chars()
             .rev()
             .take_while(|ch| test(*ch))
             .map(char::len_utf8)
-            .sum();
+            .sum::<usize>();
         if pos > 0 {
             // eat any non-spaces on the left
             pos -= self.buf[..pos]
@@ -267,7 +267,7 @@ impl LineBuffer {
                 .rev()
                 .take_while(|ch| !test(*ch))
                 .map(char::len_utf8)
-                .sum();
+                .sum::<usize>();
         }
         Some(pos)
     }
@@ -305,7 +305,7 @@ impl LineBuffer {
                 .chars()
                 .take_while(|ch| !ch.is_alphanumeric())
                 .map(char::len_utf8)
-                .sum();
+                .sum::<usize>();
             let start = pos;
             if pos < self.buf.len() {
                 // eat any non-spaces
@@ -313,7 +313,7 @@ impl LineBuffer {
                     .chars()
                     .take_while(|ch| ch.is_alphanumeric())
                     .map(char::len_utf8)
-                    .sum();
+                    .sum::<usize>();
             }
             Some((start, pos))
         } else {
