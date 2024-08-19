@@ -13,7 +13,7 @@ pub enum ReadlineError {
     /// Error from syscall
     Errno(nix::Error),
     /// Chars Error
-    Char(io::CharsError),
+    Char(io::Error),
     /// EOF (Ctrl-d)
     Eof,
     /// Ctrl-C
@@ -53,11 +53,5 @@ impl From<io::Error> for ReadlineError {
 impl From<nix::Error> for ReadlineError {
     fn from(err: nix::Error) -> ReadlineError {
         ReadlineError::Errno(err)
-    }
-}
-
-impl From<io::CharsError> for ReadlineError {
-    fn from(err: io::CharsError) -> ReadlineError {
-        ReadlineError::Char(err)
     }
 }

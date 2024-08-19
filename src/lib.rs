@@ -14,12 +14,6 @@
 //!     Err(_)   => println!("No input"),
 //! }
 //! ```
-#![feature(io)]
-#![feature(iter_arith)]
-#![feature(unicode)]
-#![cfg_attr(feature="clippy", feature(plugin))]
-#![cfg_attr(feature="clippy", plugin(clippy))]
-
 extern crate libc;
 extern crate nix;
 extern crate unicode_width;
@@ -33,7 +27,7 @@ mod kill_ring;
 pub mod line_buffer;
 
 use std::fmt;
-use std::io::{self, Read, Write};
+use std::io::{self, Error, Read, Write};
 use std::mem;
 use std::path::Path;
 use std::result;
@@ -45,7 +39,6 @@ use nix::sys::termios;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{Receiver, SendError, Sender, channel};
 use std::thread;
-use std::io::CharsError;
 
 use completion::Completer;
 use consts::{KeyPress, char_to_key_press};
@@ -329,14 +322,14 @@ fn calculate_position(s: &str, orig: Position, cols: usize) -> Position {
 fn edit_insert(s: &mut State, ch: char) -> Result<()> {
     if let Some(push) = s.line.insert(ch) {
         if push {
-            if s.cursor.col + unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) < s.cols {
-                // Avoid a full update of the line in the trivial case.
-                let bits = ch.encode_utf8();
-                let bits = bits.as_slice();
-                write_and_flush(s.out, bits)
-            } else {
+            //if s.cursor.col + unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) < s.cols {
+            //    // Avoid a full update of the line in the trivial case.
+            //    let bits = ch.
+            //    let bits = bits.as_slice();
+            //    write_and_flush(s.out, bits)
+            //} else {
                 s.refresh_line()
-            }
+            //}
         } else {
             s.refresh_line()
         }
@@ -531,7 +524,7 @@ fn edit_history_next(s: &mut State, history: &History, prev: bool) -> Result<()>
 }
 
 /// Completes the line/word
-fn complete_line(get_char_or_print: &Fn(&mut State) -> Result<result::Result<char, CharsError>>,
+fn complete_line(get_char_or_print: &Fn(&mut State) -> Result<result::Result<char, Error>>,
                  mut s: &mut State,
                  completer: &Completer)
                  -> Result<Option<char>> {
@@ -585,7 +578,7 @@ fn complete_line(get_char_or_print: &Fn(&mut State) -> Result<result::Result<cha
 /// Incremental search
 #[cfg_attr(feature="clippy", allow(if_not_else))]
 fn reverse_incremental_search(get_char_or_print: &Fn(&mut State)
-                                                     -> Result<result::Result<char, CharsError>>,
+                                                     -> Result<result::Result<char, Error>>,
                               mut s: &mut State,
                               history: &History)
                               -> Result<Option<KeyPress>> {
@@ -662,7 +655,7 @@ fn reverse_incremental_search(get_char_or_print: &Fn(&mut State)
     Ok(Some(key))
 }
 
-fn escape_sequence(get_char_or_print: &Fn(&mut State) -> Result<result::Result<char, CharsError>>,
+fn escape_sequence(get_char_or_print: &Fn(&mut State) -> Result<result::Result<char, Error>>,
                    mut s: &mut State)
                    -> Result<KeyPress> {
     // Read the next two bytes representing the escape sequence.
@@ -747,9 +740,9 @@ fn readline_edit(prompt: &str,
     let tx = tx.clone();
     thread::spawn(move || {
         let stdin = io::stdin();
-        let mut chars = stdin.lock().chars();
+        let mut chars = stdin.lock().bytes();
         loop {
-            let c = chars.next().unwrap();
+            let c = chars.next().unwrap().map(|byte| byte.into());
             tx.send(Input::Stdin(c)).unwrap();
             if !continue_rx.recv().unwrap_or(false) {
                 break;
@@ -1040,7 +1033,7 @@ pub struct Editor<'completer> {
 }
 
 pub enum Input {
-    Stdin(result::Result<char, CharsError>),
+    Stdin(result::Result<char, Error>),
     Stdout(String),
 }
 
